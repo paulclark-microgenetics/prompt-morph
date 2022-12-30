@@ -1,3 +1,4 @@
+from logging import PlaceHolder
 import math
 import os
 
@@ -22,33 +23,38 @@ def prompt_at_t(weight_indexes, prompt_list, t):
         ]
     )
 
+def insert_subject_to_prompt(prompt, subject):
+    return prompt.replace('[subject]', subject)
+
 
 """
 Interpolate between two (or more) prompts and create an image at each step.
 """
 class Script(scripts.Script):
     def title(self):
-        return "Prompt morph"
+        return "Prompt morph mine"
 
     def show(self, is_img2img):
         return not is_img2img
 
     def ui(self, is_img2img):
         i1 = gr.HTML("<p style=\"margin-bottom:0.75em\">Keyframe Format: <br>Seed | Prompt or just Prompt</p>")
-        prompt_list = gr.TextArea(label="Prompt list", placeholder="Enter one prompt per line. Blank lines will be ignored.")
+        subject_list = gr.TextArea(label="Subject list", placeholder="Enter one subject per line. Blank lines will be ignored.")
+        prompt_list = gr.TextArea(label="Prompt", placeholder="Enter one prompt. use [subject] as placeholder for subject")
+        neg_list = gr.TextArea(label="Negative prompt", placeHolder="Enter negative prompt - used for all images")
         n_images = gr.Slider(minimum=2, maximum=256, value=25, step=1, label="Number of images between keyframes")
         save_video = gr.Checkbox(label='Save results as video', value=True)
         video_fps = gr.Number(label='Frames per second', value=5)
 
-        return [i1, prompt_list, n_images, save_video, video_fps]
+        return [i1, prompt_list, n_images, save_video, video_fps, subject_list, neg_list]
 
-    def run(self, p, i1, prompt_list, n_images, save_video, video_fps):
+    def run(self, p, i1, prompt_list, n_images, save_video, video_fps, subject_list, neg_list):
         # override batch count and size
         p.batch_size = 1
         p.n_iter = 1
 
-        prompts = []
-        for line in prompt_list.splitlines():
+        subjects = []
+        for line in subject_list.splitlines():
             line = line.strip()
             if line == '':
                 continue
@@ -57,14 +63,36 @@ class Script(scripts.Script):
                 seed, prompt = '', prompt_args[0]
             else:
                 seed, prompt = prompt_args
-            prompts.append((seed.strip(), prompt.strip()))
+            subjects.append((seed.strip(), prompt.strip()))
 
-        if len(prompts) < 2:
-            msg = "prompt_morph: at least 2 prompts required"
+
+
+        if len(subjects) < 2:
+            msg = "prompt_morph: at least 2 subjects required"
+            print(msg)
+            return Processed(p, [], p.seed, info=msg)
+        prompt_list = [line.strip() for line in prompt_list.splitlines()]
+        neg_list = [line.strip() for line in neg_list.splitlines()]
+
+        if len(prompt_list) > 1:
+            msg = f"Keep all prompts on one line: {len(prompt_list)} lines found"
+            print(msg)
+            return Processed(p, [], p.seed, info=msg)
+        prompt_words = prompt_list[0]
+
+        if len(neg_list) > 1:
+            msg = f"Keep all Neg prompts on one line: {len(neg_list)} lines found"
+            print(msg)
+            return Processed(p, [], p.seed, info=msg)
+        neg_words = neg_list[0]
+        p.negative_prompt = neg_words
+
+        if prompt_words.count('[subject]') != 1:
+            msg = "[subject] not found in prompt list, please put one in"
             print(msg)
             return Processed(p, [], p.seed, info=msg)
 
-        state.job_count = 1 + (n_images - 1) * (len(prompts) - 1)
+        state.job_count = 1 + (n_images - 1) * (len(subjects) - 1)
 
         if save_video:
             import numpy as np
@@ -84,10 +112,10 @@ class Script(scripts.Script):
         p.outpath_samples = morph_path
 
         all_images = []
-        for n in range(1, len(prompts)):
+        for n in range(1, len(subjects)):
             # parsed prompts
-            start_seed, start_prompt = prompts[n-1]
-            target_seed, target_prompt = prompts[n]
+            start_seed, start_prompt = subjects[n-1]
+            target_seed, target_prompt = subjects[n]
             res_indexes, prompt_flat_list, prompt_indexes = prompt_parser.get_multicond_prompt_list([start_prompt, target_prompt])
             prompt_weights, target_weights = res_indexes
 
@@ -112,17 +140,19 @@ class Script(scripts.Script):
                 # first image is same as last of previous morph
                 if i == 0 and n > 1:
                     continue
-                state.job = f"Morph {n}/{len(prompts)-1}, image {i+1}/{n_images}"
+                state.job = f"Morph {n}/{len(subjects)-1}, image {i+1}/{n_images}"
 
                 # TODO: optimize when weight is zero
                 # update prompt weights and subseed strength
                 t = i / (n_images - 1)
                 scaled_prompt = prompt_at_t(prompt_weights, prompt_flat_list, 1.0 - t)
                 scaled_target = prompt_at_t(target_weights, prompt_flat_list, t)
-                p.prompt = f'{scaled_prompt} AND {scaled_target}'
+                subject_prompt = f'{scaled_prompt} AND {scaled_target}'
+                p.prompt = insert_subject_to_prompt(prompt_words, subject_prompt)
                 if p.seed != p.subseed:
                     p.subseed_strength = t
-
+                print(f'Prompt is: {p.prompt}')
+                print(f'Negative prompt is: {p.negative_prompt}')
                 processed = process_images(p)
                 if not state.interrupted:
                     all_images.append(processed.images[0])
@@ -131,7 +161,7 @@ class Script(scripts.Script):
             clip = ImageSequenceClip.ImageSequenceClip([np.asarray(t) for t in all_images], fps=video_fps)
             clip.write_videofile(os.path.join(morph_path, f"morph-{morph_number:05}.webm"), codec='libvpx-vp9', ffmpeg_params=['-pix_fmt', 'yuv420p', '-crf', '32', '-b:v', '0'], logger=None)
 
-        prompt = "\n".join([f"{seed} | {prompt}" for seed, prompt in prompts])
+        prompt = "\n".join([f"{seed} | {prompt}" for seed, prompt in subjects])
         # TODO: instantiate new Processed instead of overwriting one from the loop
         processed.all_prompts = [prompt]
         processed.prompt = prompt
